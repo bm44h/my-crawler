@@ -1,30 +1,21 @@
-// server.js - Hyper-Crawler v2.7 (99% Accuracy Edition)
+// server.js - Hyper-Crawler v2.7 (99% Accuracy Edition) - Supabase Integrated
 
 // --- الاعتماديات ---
 const express = require('express');
 const cheerio = require('cheerio');
 const { HuggingFaceTransformersEmbeddings } = require('@langchain/community/embeddings/hf_transformers');
 const { chromium } = require('playwright');
-const cors = require('cors'); // <-- 1. قم باستيراد الحزمة الجديدة
+const cors = require('cors');
 const { Document } = require('@langchain/core/documents');
-const { CloudClient } = require('chromadb');
+const { SupabaseVectorStore } = require("@langchain/community/vectorstores/supabase"); // <-- Supabase Integration
+const { createClient } = require("@supabase/supabase-js"); // <-- Supabase Integration
 const { URL } = require('url'); // لإصلاح مشكلة عدم وجود URL في بيئة Node.js العادية
 
 // --- إعداد الخادم ---
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-const whitelist = ['https://chatarb.vercel.app', 'http://localhost:3000'];
-const corsOptions = {
-  origin: function (origin, callback ) {
-    if (whitelist.indexOf(origin) !== -1 || !origin) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  }
-};
-app.use(cors(corsOptions));
+app.use(cors()); // <-- تفعيل CORS
 app.use(express.json());
 
 // ============================================
@@ -559,34 +550,44 @@ app.post('/crawl', async (req, res) => {
   let browser = null;
 
   try {
-    // استخدام req.body بدلاً من request.json()
     const { url: baseUrl, projectId } = req.body; 
 
     if (!baseUrl || !projectId) {
-      // استخدام res.status().json() بدلاً من NextResponse.json()
       return res.status(400).json({ error: "URL and projectId are required" });
     }
 
-    console.log(`\n${"=".repeat(60)}\n⚡ HYPER-CRAWLER v2.7 (99% Accuracy Edition) ⚡`);
+    console.log(`\n${"=".repeat(60)}\n⚡ HYPER-CRAWLER v2.7 (Supabase Edition) ⚡`);
     console.log(`📈 Goals: 1 Store Name, 1 Shipping, 1 Returns, 27 Products\n${"=".repeat(60)}\n`);
 
     const MAX_CONCURRENT_TASKS = 5;
     const GOAL_PATIENCE_THRESHOLD = 50;
     const MAX_URL_QUEUE_SIZE = 300;
 
+    // ✅ [الحل النهائي والدائم] إعداد Supabase Vector Store
     console.log("[Embeddings] Initializing HuggingFace embeddings...");
-    // يجب أن تكون الدالة متوفرة في البيئة
-    const langchainEmbeddings = new HuggingFaceTransformersEmbeddings({ modelName: "Xenova/multilingual-e5-base" });
-    const chromaEmbeddingFunction = {
-      generate: async (texts) => langchainEmbeddings.embedDocuments(texts),
-    };
-    const collectionName = `project-${projectId}`;
+    const embeddings = new HuggingFaceTransformersEmbeddings({ modelName: "Xenova/multilingual-e5-base" });
 
-    const chromaClient = new CloudClient();
+    // أنشئ عميل Supabase باستخدام متغيرات البيئة
+    const privateKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    if (!privateKey || !url) {
+        throw new Error("SUPABASE_SERVICE_ROLE_KEY and NEXT_PUBLIC_SUPABASE_URL environment variables must be set.");
+    }
+    const client = createClient(url, privateKey);
 
-    try { await chromaClient.deleteCollection({ name: collectionName }); } catch (e) { /* ignore */ }
-    const collection = await chromaClient.createCollection({ name: collectionName, embeddingFunction: chromaEmbeddingFunction });
-    console.log("[ChromaDB] Collection created successfully.");
+    // احذف البيانات القديمة المتعلقة بالمشروع (مهم جدًا)
+    // يجب أن يكون لديك Row Level Security (RLS) مُعطلة أو سياسة تسمح لـ service_role_key بالحذف
+    await client.from('documents').delete().match({ 'metadata->>projectId': projectId });
+    console.log(`[Supabase] Deleted old documents for project: ${projectId}`);
+
+    // أنشئ مخزن المتجهات
+    const vectorStore = new SupabaseVectorStore(embeddings, {
+      client,
+      tableName: "documents",
+      queryName: "match_documents",
+    });
+    console.log("[Supabase] Vector store initialized successfully.");
+
 
     browser = await chromium.launch({ headless: true, args: ["--disable-dev-shm-usage", "--no-sandbox"] });
     const context = await browser.newContext({ userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" });
@@ -658,222 +659,215 @@ app.post('/crawl', async (req, res) => {
               'policy', 'سياسة', 'shipping-policy', 'return-policy'
             ];
             
-            const isPolicyUrl = policyPatterns.some(pattern => decodedUrl.includes(pattern));
+            const isPolicyUrl = policyPatterns.some(pattern => decodedUrl.includes(pattern) || linkText.includes(pattern));
             if (isPolicyUrl) {
-              priority = 100; // أولوية قصوى
-              console.log(`  [Task ${taskNum}] 🚨 HIGH PRIORITY POLICY URL: ${absoluteUrl}`);
+              priority = 10; // أولوية عالية لصفحات السياسات
+            } else if (decodedUrl.match(/\/(products?|product|item|p)\//)) {
+              priority = 5; // أولوية متوسطة لصفحات المنتجات
+            } else if (decodedUrl.match(/\/(categories?|category|collections?|collection|shop|store|متجر|فئات|مجموعات)\//)) {
+              priority = 3; // أولوية منخفضة لصفحات الفئات
             }
-            else if (!goals.shipping && (linkText.includes("شحن") || decodedUrl.includes("shipping"))) priority = 95;
-            else if (!goals.returns && (linkText.includes("استرجاع") || decodedUrl.includes("return"))) priority = 90;
-            else if (goals.products < 27 && (decodedUrl.match(/\/(products?|item|p)\//))) priority = 80;
-            // 🔥 IMPROVEMENT 4: زيادة أولوية صفحات الفئات
-            else if (goals.products < 27 && (decodedUrl.includes("categories") || decodedUrl.includes("collection") || decodedUrl.includes("shop"))) priority = 75;
-            
-            if (priority > 1) urlsToVisit.set(absoluteUrl, Math.max(urlsToVisit.get(absoluteUrl) || 0, priority));
+
+            urlsToVisit.set(absoluteUrl, priority);
           }
-        } catch (e) { /* ignore */ }
+        } catch (e) {
+          // تجاهل الروابط غير الصالحة
+        }
       });
 
-      const documents = [];
-      const newDocsMetadata = [];
-
+      // 🎯 تصنيف الصفحة
       const classification = intelligentPageClassifier(url, htmlContent);
-      console.log(`  [Task ${taskNum}] 🕵️  Classification: Category='${classification.category}', Confidence=${classification.confidence}, Platform='${classification.platform}', Signals=[${classification.signals.join(', ')}]`);
+      console.log(`  [Task ${taskNum}] 🏷️  Classification: ${classification.category} (Conf: ${classification.confidence}%, Platform: ${classification.platform})`);
 
-      if (classification.category === "ignore") return;
+      if (classification.category === "ignore") {
+        console.log(`  [Task ${taskNum}] 🗑️  Ignored URL based on pattern.`);
+        return;
+      }
 
-      // 🔥 IMPROVEMENT 6: استخراج محسن لاسم المتجر
+      // 🎯 استخراج اسم المتجر (هدف)
       if (!goals.storeName) {
         const storeName = extractStoreName($, classification.platform);
         if (storeName) {
-          const metadata = { source: url, category: "store_name", projectId, confidence: 90, platform: classification.platform };
-          documents.push(new Document({ pageContent: `اسم المتجر: ${storeName}`, metadata }));
-          newDocsMetadata.push(metadata);
-          console.log(`  [Task ${taskNum}] 🏪 Store Name Found: ${storeName}`);
+          goals.storeName = true;
+          console.log(`  [Task ${taskNum}] 🏆 GOAL ACHIEVED: Store Name found: ${storeName}`);
+          // إضافة اسم المتجر كمستند
+          const storeDoc = new Document({
+            pageContent: `اسم المتجر: ${storeName}`,
+            metadata: {
+              projectId,
+              source: baseUrl,
+              type: "store_name",
+              url: baseUrl,
+            },
+          });
+          // ✅ [Supabase] إضافة المستند
+          await vectorStore.addDocuments([storeDoc]);
+          totalDocumentsProcessed++;
         }
       }
 
+      // 🎯 استخراج سياسات الشحن والإرجاع (أهداف)
       if (classification.category === "shipping" && !goals.shipping) {
-        const cleanedContent = cleanContent($);
-        if (cleanedContent.length > 50) {
-          const metadata = { source: url, category: "shipping", projectId, confidence: classification.confidence };
-          documents.push(new Document({ pageContent: cleanedContent, metadata }));
-          newDocsMetadata.push(metadata);
+        const content = cleanContent($);
+        if (content.length > 100) {
+          goals.shipping = true;
+          console.log(`  [Task ${taskNum}] 🏆 GOAL ACHIEVED: Shipping Policy found.`);
+          const shippingDoc = new Document({
+            pageContent: `سياسة الشحن والتوصيل: ${content}`,
+            metadata: {
+              projectId,
+              source: url,
+              type: "shipping_policy",
+              url,
+            },
+          });
+          // ✅ [Supabase] إضافة المستند
+          await vectorStore.addDocuments([shippingDoc]);
+          totalDocumentsProcessed++;
         }
       }
+
       if (classification.category === "returns" && !goals.returns) {
-        const cleanedContent = cleanContent($);
-        if (cleanedContent.length > 50) {
-          const metadata = { source: url, category: "returns", projectId, confidence: classification.confidence };
-          documents.push(new Document({ pageContent: cleanedContent, metadata }));
-          newDocsMetadata.push(metadata);
+        const content = cleanContent($);
+        if (content.length > 100) {
+          goals.returns = true;
+          console.log(`  [Task ${taskNum}] 🏆 GOAL ACHIEVED: Returns Policy found.`);
+          const returnsDoc = new Document({
+            pageContent: `سياسة الاسترجاع والاستبدال: ${content}`,
+            metadata: {
+              projectId,
+              source: url,
+              type: "returns_policy",
+              url,
+            },
+          });
+          // ✅ [Supabase] إضافة المستند
+          await vectorStore.addDocuments([returnsDoc]);
+          totalDocumentsProcessed++;
         }
       }
 
-      // 🔥 IMPROVEMENT 4: معالجة صفحات الفئات
-      if (classification.category === "category_page" && goals.products < 27) {
-        console.log(`  [Task ${taskNum}] 📂 Category page detected - extracting product links for future crawling`);
-        // نحتفظ بالصفحة كمرجع للفئة ولكن لا نستخرج منتجات منها مباشرة
-        // الروابط الموجودة بها ستتم معالجتها في الدورات القادمة
-      }
-
-      if (classification.category === "product_page" && goals.products < 27) {
-        const product = extractProductInfo($, classification.platform);
-        console.log(`  [Task ${taskNum}] 🛍️  Product extraction attempt:`);
-        console.log(`  [Task ${taskNum}]    - Name found: ${!!product.name} ${product.name ? `(${product.name.substring(0, 50)}...)` : ''}`);
-        console.log(`  [Task ${taskNum}]    - Desc found: ${!!product.description} (${product.description.length} chars)`);
-        
-        if (product.name && product.description) {
-          const content = `اسم المنتج: ${product.name}\nوصف المنتج: ${product.description}`;
-          const metadata = { source: url, category: 'product_info', projectId, productName: product.name, confidence: classification.confidence };
-          documents.push(new Document({ pageContent: content, metadata }));
-          newDocsMetadata.push(metadata);
-        } else {
-          console.log(`  [Task ${taskNum}] ⚠️  WARNING: Product page classified, but extraction failed.`);
-          // DEBUG محسن
-          const h1Text = $("h1").first().text().trim();
-          const hasPrice = $(".price, [class*='price']").length > 0;
-          const hasButton = $("button").length > 0;
-          console.log(`  [Task ${taskNum}]    DEBUG - H1: "${h1Text.substring(0, 50)}", Price: ${hasPrice}, Buttons: ${hasButton}`);
+      // 🎯 استخراج بيانات المنتج (هدف)
+      if (classification.category === "product_page" && goals.products < GOAL_PATIENCE_THRESHOLD) {
+        const { name, description } = extractProductInfo($, classification.platform);
+        if (name && description && description.length > 50) {
+          goals.products++;
+          console.log(`  [Task ${taskNum}] 🏆 GOAL ACHIEVED: Product found: ${name} (Total: ${goals.products})`);
+          const productDoc = new Document({
+            pageContent: `منتج: ${name}. الوصف: ${description}`,
+            metadata: {
+              projectId,
+              source: url,
+              type: "product",
+              url,
+              product_name: name,
+            },
+          });
+          // ✅ [Supabase] إضافة المستند
+          await vectorStore.addDocuments([productDoc]);
+          totalDocumentsProcessed++;
         }
       }
-
-      // Fallback detection محسن
-      if (classification.category === "general" && goals.products < 27) {
-        const decodedUrl = decodeURIComponent(url).toLowerCase();
-        const looksLikeProduct = decodedUrl.match(/\/(product|item|p)\//);
-        
-        if (looksLikeProduct) {
-          console.log(`  [Task ${taskNum}] 🔍 URL pattern suggests product, attempting enhanced extraction...`);
-          const product = extractProductInfo($, classification.platform);
-          
-          if (product.name && product.description) {
-            console.log(`  [Task ${taskNum}] ✅ Fallback extraction SUCCESS!`);
-            const content = `اسم المنتج: ${product.name}\nوصف المنتج: ${product.description}`;
-            const metadata = { source: url, category: 'product_info', projectId, productName: product.name, confidence: 50 };
-            documents.push(new Document({ pageContent: content, metadata }));
-            newDocsMetadata.push(metadata);
-          } else {
-            console.log(`  [Task ${taskNum}] ❌ Fallback extraction failed. Name: ${!!product.name}, Desc: ${!!product.description}`);
-          }
+      
+      // 🎯 إضافة المحتوى العام (لصفحات الفئات والصفحات العامة)
+      if (classification.category === "general" || classification.category === "category_page") {
+        const content = cleanContent($);
+        if (content.length > 200) {
+          const generalDoc = new Document({
+            pageContent: content,
+            metadata: {
+              projectId,
+              source: url,
+              type: classification.category === "category_page" ? "category_page" : "general_content",
+              url,
+            },
+          });
+          // ✅ [Supabase] إضافة المستند
+          await vectorStore.addDocuments([generalDoc]);
+          totalDocumentsProcessed++;
         }
-      }
-
-      if (documents.length > 0) {
-        await collection.add({ ids: newDocsMetadata.map(() => `${projectId}-${Date.now()}-${Math.random()}`), documents: documents.map(d => d.pageContent), metadatas: newDocsMetadata });
-        totalDocumentsProcessed += documents.length;
-        newDocsMetadata.forEach(meta => {
-          if (meta.category === 'store_name' && !goals.storeName) { goals.storeName = true; console.log(`  [Task ${taskNum}] ✅ Goal Met: Store Name`); }
-          if (meta.category === 'shipping' && !goals.shipping) { goals.shipping = true; console.log(`  [Task ${taskNum}] ✅ Goal Met: Shipping`); }
-          if (meta.category === 'returns' && !goals.returns) { goals.returns = true; console.log(`  [Task ${taskNum}] ✅ Goal Met: Returns`); }
-          if (meta.category === 'product_info' && goals.products < 27) { goals.products++; console.log(`  [Task ${taskNum}] ✅ Goal Progress: Products (${goals.products}/27)`); }
-        });
       }
     };
 
-    const runningTasks = [];
+    // ============================================
+    // 🚀 حلقة الزحف الرئيسية
+    // ============================================
     let taskCounter = 0;
-    const mainLoop = async () => {
-        while (true) {
-            // 🔥 الإصلاح: تحقق من أن المتصفح لا يزال مفتوحاً
-            if (!browser || !browser.isConnected()) {
-                console.log("❌ Browser closed unexpectedly, stopping crawl...");
-                break;
-            }
-            
-            if (visitedUrls.size > GOAL_PATIENCE_THRESHOLD && runningTasks.length === 0) {
-                if (!goals.shipping) { console.log(`🟡 Patience threshold reached for 'shipping'. Giving up.`); goals.shipping = true; }
-                if (!goals.returns) { console.log(`🟡 Patience threshold reached for 'returns'. Giving up.`); goals.returns = true; }
-            }
-            
-            // 🔥 الإصلاح: تحقق من حالة المتصفح قبل إنشاء مهام جديدة
-            if ((goals.storeName && goals.shipping && goals.returns && goals.products >= 27) || 
-                (urlsToVisit.size === 0 && runningTasks.length === 0) ||
-                (!browser?.isConnected())) {
-                break;
-            }
+    let totalUrlsCrawled = 0;
+    let patienceCounter = 0;
 
-            while (runningTasks.length < MAX_CONCURRENT_TASKS && urlsToVisit.size > 0 && browser?.isConnected()) {
-                const nextUrl = Array.from(urlsToVisit.entries()).sort((a, b) => b[1] - a[1])[0][0];
-                urlsToVisit.delete(nextUrl);
-                if (visitedUrls.has(nextUrl)) continue;
-                visitedUrls.add(nextUrl);
+    while (urlsToVisit.size > 0 && patienceCounter < GOAL_PATIENCE_THRESHOLD) {
+      // فرز الروابط حسب الأولوية (الأعلى أولاً)
+      const sortedUrls = Array.from(urlsToVisit.entries()).sort(([, p1], [, p2]) => p2 - p1);
+      const urlsToProcess = sortedUrls.slice(0, MAX_CONCURRENT_TASKS);
+      
+      if (urlsToProcess.length === 0) break;
 
-                const task = processUrlTask(nextUrl, ++taskCounter);
-                runningTasks.push(task);
-                
-                // 🔥 الإصلاح: معالجة أفضل للأخطاء في المهام
-                task.catch(error => {
-                    console.error(`  [Task ${taskCounter}] ❌ Task failed: ${error.message}`);
-                }).finally(() => {
-                    const index = runningTasks.indexOf(task);
-                    if (index > -1) runningTasks.splice(index, 1);
-                });
-            }
+      const tasks = urlsToProcess.map(([url]) => {
+        urlsToVisit.delete(url);
+        visitedUrls.add(url);
+        taskCounter++;
+        return processUrlTask(url, taskCounter);
+      });
 
-            if (runningTasks.length > 0) {
-                await Promise.race(runningTasks);
-            } else if (urlsToVisit.size > 0 && browser?.isConnected()) {
-                // الانتظار قبل المحاولة مرة أخرى
-                await new Promise(resolve => setTimeout(resolve, 500));
-            } else {
-                await new Promise(resolve => setTimeout(resolve, 100));
-            }
-        }
-    };
+      await Promise.all(tasks);
+      totalUrlsCrawled += tasks.length;
 
-    await mainLoop();
-    // 🔥 الإصلاح: انتظار جميع المهام بشكل آمن
-    if (runningTasks.length > 0) {
-        console.log(`⏳ Waiting for ${runningTasks.length} remaining tasks...`);
-        await Promise.allSettled(runningTasks);
+      // تحديث عداد الصبر
+      if (goals.storeName && goals.shipping && goals.returns && goals.products >= 27) {
+        console.log("✅ All primary goals met. Exiting crawl loop.");
+        break;
+      }
+      
+      // إذا لم يتم تحقيق أي هدف جديد في هذه الدورة، زد عداد الصبر
+      const goalsMet = goals.storeName + goals.shipping + goals.returns + goals.products;
+      if (goalsMet === patienceCounter) {
+          patienceCounter++;
+      } else {
+          patienceCounter = goalsMet; // إعادة تعيين عداد الصبر بناءً على الأهداف المكتملة
+      }
+
+      console.log(`\n--- Cycle Summary ---`);
+      console.log(`Goals: StoreName=${goals.storeName}, Shipping=${goals.shipping}, Returns=${goals.returns}, Products=${goals.products}/27`);
+      console.log(`Queue Size: ${urlsToVisit.size}, Crawled: ${totalUrlsCrawled}, Patience: ${patienceCounter}/${GOAL_PATIENCE_THRESHOLD}`);
+      console.log(`---------------------\n`);
     }
-    const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-    console.log(`\n${"=".repeat(60)}\n✅ HYPER-CRAWLER v2.7 COMPLETED!`);
-    console.log(`⏱️  Duration: ${duration}s`);
-    console.log(`🔗 URLs visited: ${visitedUrls.size}`);
-    console.log(`--- WAIT STRATEGY STATISTICS ---`);
-    waitStrategyStats.forEach((count, strategy) => {
-      console.log(`  ${strategy}: ${count} times`);
-    });
-    console.log(`--- FINAL GOAL STATUS ---`);
-    console.log(`Store Name Found: ${goals.storeName}`);
-    console.log(`Shipping Info Found: ${goals.shipping}`);
-    console.log(`Returns Info Found: ${goals.returns}`);
-    console.log(`Products Found: ${goals.products} / 27`);
-    console.log(`Overall Accuracy: ${((goals.products / 27) * 100).toFixed(1)}%`);
+
+    const totalTime = (Date.now() - startTime) / 1000;
+    console.log(`\n${"=".repeat(60)}`);
+    console.log(`✅ Crawling Finished!`);
+    console.log(`Total URLs Crawled: ${totalUrlsCrawled}`);
+    console.log(`Total Documents Processed: ${totalDocumentsProcessed}`);
+    console.log(`Total Time: ${totalTime.toFixed(2)}s`);
+    console.log(`Wait Strategy Stats:`, Object.fromEntries(waitStrategyStats));
     console.log(`${"=".repeat(60)}\n`);
 
-    // استخدام res.status().json() بدلاً من NextResponse.json()
-    return res.status(200).json({
-      success: true,
-      message: 'Hyper-Crawler v2.7 completed with 99% accuracy!',
-      stats: { 
-        duration: `${duration}s`, 
-        urlsVisited: visitedUrls.size, 
-        documentsProcessed: totalDocumentsProcessed, 
-        goals,
-        accuracy: `${((goals.products / 27) * 100).toFixed(1)}%`,
-        waitStrategies: Object.fromEntries(waitStrategyStats)
+    res.json({
+      status: "success",
+      message: "Crawling and vector embedding completed successfully.",
+      summary: {
+        urls_crawled: totalUrlsCrawled,
+        documents_processed: totalDocumentsProcessed,
+        goals_achieved: goals,
+        time_seconds: totalTime.toFixed(2),
       },
     });
 
   } catch (error) {
-    console.error('\n❌ CRITICAL ERROR:', error);
-    const errorMessage = error instanceof Error ? error.message : "Unknown error";
-    // استخدام res.status().json() بدلاً من NextResponse.json()
-    return res.status(500).json({ success: false, error: 'Internal server error', details: errorMessage });
+    console.error("🚨 CRITICAL ERROR IN CRAWL ROUTE:", error);
+    res.status(500).json({
+      status: "error",
+      message: "An internal server error occurred during the crawl process.",
+      details: error.message,
+    });
   } finally {
-    if (browser && browser.isConnected()) {
+    if (browser) {
       await browser.close();
-      console.log("[Playwright] Browser closed safely.");
-    } else {
-      console.log("[Playwright] Browser already closed or disconnected.");
     }
   }
 });
 
-// --- تشغيل الخادم ---
+// --- بدء الخادم ---
 app.listen(PORT, () => {
-  console.log(`Crawler service listening on port ${PORT}`);
+  console.log(`Server is running on port ${PORT}`);
 });
