@@ -5,6 +5,7 @@ const express = require('express');
 const cheerio = require('cheerio');
 const { HuggingFaceTransformersEmbeddings } = require('@langchain/community/embeddings/hf_transformers');
 const { chromium } = require('playwright');
+const cors = require('cors'); // <-- 1. قم باستيراد الحزمة الجديدة
 const { Document } = require('@langchain/core/documents');
 const { CloudClient } = require('chromadb');
 const { URL } = require('url'); // لإصلاح مشكلة عدم وجود URL في بيئة Node.js العادية
@@ -12,6 +13,18 @@ const { URL } = require('url'); // لإصلاح مشكلة عدم وجود URL �
 // --- إعداد الخادم ---
 const app = express();
 const PORT = process.env.PORT || 10000;
+
+const whitelist = ['https://chatarb.vercel.app', 'http://localhost:3000'];
+const corsOptions = {
+  origin: function (origin, callback ) {
+    if (whitelist.indexOf(origin) !== -1 || !origin) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  }
+};
+app.use(cors(corsOptions));
 app.use(express.json());
 
 // ============================================
