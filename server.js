@@ -5,7 +5,7 @@ const express = require('express');
 const cheerio = require('cheerio');
 const { HuggingFaceTransformersEmbeddings } = require('@langchain/community/embeddings/hf_transformers');
 const { chromium } = require('playwright');
-const { Document } = require('langchain/document');
+const { Document } = require('@langchain/core/documents');
 const { CloudClient } = require('chromadb');
 const { URL } = require('url'); // لإصلاح مشكلة عدم وجود URL في بيئة Node.js العادية
 
