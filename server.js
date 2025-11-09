@@ -581,7 +581,10 @@ app.post('/crawl', async (req, res) => {
       generate: async (texts) => langchainEmbeddings.embedDocuments(texts),
     };
     const collectionName = `project-${projectId}`;
-    const chromaClient = new CloudClient();
+      const chromaClient = new CloudClient({
+      path: process.env.CHROMA_URL, // سنستخدم هذا المتغير
+      token: process.env.CHROMA_TOKEN, // وهذا المتغير
+  });
     try { await chromaClient.deleteCollection({ name: collectionName }); } catch (e) { /* ignore */ }
     const collection = await chromaClient.createCollection({ name: collectionName, embeddingFunction: chromaEmbeddingFunction });
     console.log("[ChromaDB] Collection created successfully.");
