@@ -15,8 +15,6 @@ COPY . .
 # قم بتثبيت متصفح Chromium فقط
 RUN npx playwright install --with-deps chromium
 
-# ✅ [الحل النهائي] أخبر Playwright صراحةً أين توجد المتصفحات
-ENV PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright
 
 ENV PORT=10000
 EXPOSE 10000

@@ -589,7 +589,11 @@ app.post('/crawl', async (req, res) => {
     console.log("[Supabase] Vector store initialized successfully.");
 
 
-    browser = await chromium.launch({ headless: true, args: ["--disable-dev-shm-usage", "--no-sandbox"] });
+    browser = await chromium.launch({
+        headless: true,
+        args: ["--disable-dev-shm-usage", "--no-sandbox"],
+        executablePath: '/root/.cache/ms-playwright/chromium-1194/chrome-linux/chrome' // <-- المسار القاطع
+    });
     const context = await browser.newContext({ userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" });
     await context.route("**/*", (route) => {
       if (["image", "stylesheet", "font", "media"].includes(route.request().resourceType())) route.abort();
