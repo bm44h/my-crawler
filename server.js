@@ -581,10 +581,18 @@ app.post('/crawl', async (req, res) => {
       generate: async (texts) => langchainEmbeddings.embedDocuments(texts),
     };
     const collectionName = `project-${projectId}`;
-      const chromaClient = new CloudClient({
-      path: process.env.CHROMA_URL, // سنستخدم هذا المتغير
-      token: process.env.CHROMA_TOKEN, // وهذا المتغير
-  });
+  // ✅ [الحل النهائي بناءً على توثيق ChromaDB]
+  // نحن بحاجة إلى بناء عنوان URL بأنفسنا وتمرير المصادقة في الترويسات
+    const chromaPath = `https://${process.env.CHROMA_TENANT}-${process.env.CHROMA_DATABASE}.cluster.trychroma.com`;
+  
+    const chromaClient = new CloudClient({
+        path: chromaPath,
+        fetchOptions: {
+            headers: {
+                "Authorization": `Bearer ${process.env.CHROMA_API_KEY}`
+            }
+        }
+    } );
     try { await chromaClient.deleteCollection({ name: collectionName }); } catch (e) { /* ignore */ }
     const collection = await chromaClient.createCollection({ name: collectionName, embeddingFunction: chromaEmbeddingFunction });
     console.log("[ChromaDB] Collection created successfully.");
